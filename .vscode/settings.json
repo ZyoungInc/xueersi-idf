@@ -1,0 +1,17 @@
+{
+  "idf.currentSetup": "/home/zyoung/esp/v5.5.4/esp-idf",
+  "idf.openOcdConfigs": [
+    "board/esp32-wrover-kit-3.3v.cfg"
+  ],
+  "idf.port": "/dev/ttyACM0",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32"
+  },
+  "clangd.path": "/home/zyoung/.espressif/tools/esp-clang/esp-19.1.2_20250312/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/zyoung/project/esp/xiaomiao/build"
+  ],
+  "idf.flashType": "UART"
+}

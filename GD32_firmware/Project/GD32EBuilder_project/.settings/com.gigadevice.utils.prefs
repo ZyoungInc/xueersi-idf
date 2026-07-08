@@ -1,0 +1,8 @@
+buildtools.path=Tools/BuildTools/2.10-20180103-1919/bin
+eclipse.preferences.version=1
+ldfile.flash.length=128
+ldfile.ram.length=16
+mcu.target=GD32F350RBT6
+toolchain.name=GNU Tools for ARM Embedded Processors
+toolchain.path.1287942917=Tools/ARMEmbeddedGCC/bin
+toolchain.prefix=arm-none-eabi-
