@@ -1,4 +1,39 @@
-# 小喵掌机硬件与底层协议
+# 小喵掌机 ESP-IDF 固件与硬件资料
+
+这是给学而思小喵掌机移植的 ESP-IDF / LVGL 固件工程，同时整理了屏幕、按键、传感器、GD32 协处理器和底层协议等硬件资料。
+
+## 固件下载与刷入
+
+已经编译好的 merged bin 会放在本项目的 [Releases](https://github.com/ZyoungInc/xueersi-idf/releases/latest) 页面。普通用户可以直接下载 release 里的 `xiaomiao-merged.bin` 并从 `0x0` 地址刷入，不需要自己搭建 ESP-IDF 编译环境。
+
+示例命令：
+
+```bash
+esptool.py --chip esp32 -b 460800 write_flash 0x0 xiaomiao-merged.bin
+```
+
+刷入前请确认目标硬件是 ESP32-WROVER-B 版本的小喵掌机，并确认串口连接正常。
+
+## 当前状态
+
+- ESP32 侧固件已经移植到 ESP-IDF，使用 LVGL 9.x 驱动 ST7735/ST7785 类 SPI 屏幕，并提供硬件状态分页 UI。
+- 光照、热敏、蜂鸣器、按键、MicroSD、I2C 设备探测等功能已经接入 ESP32 侧固件。
+- GD32 固件仍在开发中，目前公开的 GD32 工程主要用于 USB 转串口功能。
+- GD32 与 ESP32 间的 LED、电机等控制协议仍在整理，正在考虑是否兼容原有协议。欢迎大家在 Issues 里提出建议。
+
+## 原理图与鸣谢
+
+原理图文件已整理为 [`xueersi-xiaomiao-schematic.pdf`](xueersi-xiaomiao-schematic.pdf)。
+
+感谢 ID「我为电波狂」对硬件进行测量并制作原理图，这部分资料对后续移植和维护非常关键。
+
+## 参与项目
+
+如果这个项目对你有帮助，欢迎 Star。遇到问题、发现硬件差异、或者有协议兼容建议，可以提交 Issue。也欢迎提交 PR，我会审核后合并。
+
+## 使用与署名要求
+
+二次开发、转载、分发、商用或以任何形式使用本项目内容时，必须保留并明确引用原作者与本项目来源，以尊重劳动成果。违反者将依法追究责任；本人保留所有权利。
 
 ## 1. 总体架构
 
