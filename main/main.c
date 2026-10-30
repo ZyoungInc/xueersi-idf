@@ -29,11 +29,14 @@
 #include "esp_idf_version.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
+#include "espnow_link.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "motion_level.h"
 #include "sdmmc_cmd.h"
 #include "sdkconfig.h"
 
@@ -231,6 +234,7 @@ typedef enum {
     UI_PAGE_GPIO26,
     UI_PAGE_ADC32,
     UI_PAGE_ADC33,
+    UI_PAGE_ESPNOW,
     UI_PAGE_SYSTEM,
     UI_PAGE_ABOUT,
     UI_PAGE_COUNT,
@@ -282,8 +286,13 @@ typedef struct {
     lv_obj_t *status;
     lv_obj_t *hint;
     lv_obj_t *accent;
+    lv_obj_t *motion;
+    lv_obj_t *espnow_peer;
+    lv_obj_t *espnow_detail;
     lv_chart_series_t *chart_series;
     uint32_t chart_history_version;
+    uint32_t espnow_revision;
+    uint8_t espnow_selected;
     lv_group_t *group;
     ui_page_t page_id;
 } ui_state_t;
@@ -334,6 +343,7 @@ static uint8_t s_light_hist_count;
 static uint32_t s_therm_accum;
 static uint16_t s_therm_accum_count;
 static uint32_t s_last_therm_publish_ms;
+static uint32_t s_key_press_serial;
 
 static int pct_from_raw(int raw)
 {
@@ -1044,6 +1054,7 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     static int stable_index = -1;
     static uint32_t raw_changed_ms = 0;
     static uint32_t last_key = LV_KEY_ENTER;
+    const int previous_index = stable_index;
     int raw_index = -1;
     const uint32_t now_ms = lv_tick_get();
 
@@ -1066,6 +1077,9 @@ static void keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
     if (stable_index >= 0) {
+        if (stable_index != previous_index) {
+            s_key_press_serial++;
+        }
         last_key = s_buttons[stable_index].key;
         data->state = LV_INDEV_STATE_PRESSED;
         data->key = last_key;
@@ -1301,6 +1315,7 @@ static const char *const s_page_names[UI_PAGE_COUNT] = {
     "GPIO26",
     "GPIO32",
     "GPIO33",
+    "ESP-NOW",
     "SYSTEM",
     "ABOUT",
 };
@@ -1622,13 +1637,94 @@ static void ui_build_about_page(lv_obj_t *page)
     s_ui.chart_series = NULL;
 }
 
+static void ui_build_espnow_page(lv_obj_t *page)
+{
+    s_ui.value = ui_label(page, "RADIO OFF", 32, UI_BLACK, &lv_font_montserrat_14, LV_TEXT_ALIGN_LEFT);
+    s_ui.sub = ui_label(page, "", 54, UI_BROWN, &lv_font_montserrat_10, LV_TEXT_ALIGN_LEFT);
+    s_ui.espnow_peer = ui_label(page, "NO PEERS", 76, UI_BLACK, &lv_font_montserrat_12, LV_TEXT_ALIGN_LEFT);
+    s_ui.espnow_detail = ui_label(page, "", 94, UI_BROWN, &lv_font_montserrat_10, LV_TEXT_ALIGN_LEFT);
+    s_ui.hint = ui_label(page, "", 113, UI_BLACK, &lv_font_montserrat_10, LV_TEXT_ALIGN_LEFT);
+}
+
+static void ui_refresh_espnow(void)
+{
+    espnow_link_status_t status;
+    espnow_link_get_status(&status);
+    if (status.revision == s_ui.espnow_revision) {
+        return;
+    }
+    s_ui.espnow_revision = status.revision;
+    if (s_ui.espnow_selected >= status.peer_count) {
+        s_ui.espnow_selected = 0;
+    }
+
+    if (status.state == ESPNOW_LINK_ERROR) {
+        lv_label_set_text(s_ui.value, "UNAVAILABLE");
+    }
+    else if (status.state == ESPNOW_LINK_STARTING) {
+        lv_label_set_text(s_ui.value, "STARTING");
+    }
+    else if (status.pairing) {
+        lv_label_set_text_fmt(s_ui.value, "PAIRING %us", (unsigned)status.pairing_seconds);
+    }
+    else if (status.state == ESPNOW_LINK_OFF) {
+        lv_label_set_text(s_ui.value, "RADIO OFF");
+    }
+    else {
+        lv_label_set_text_fmt(s_ui.value, "%u ONLINE", (unsigned)status.online_count);
+    }
+    lv_label_set_text_fmt(s_ui.sub, "ME " MACSTR, MAC2STR(status.local_mac));
+
+    uint8_t paired_count = 0;
+    for (uint8_t i = 0; i < status.peer_count; ++i) {
+        paired_count += status.peers[i].paired;
+    }
+    if (status.peer_count == 0) {
+        lv_label_set_text(s_ui.espnow_peer, "NO PEERS");
+        lv_label_set_text(s_ui.espnow_detail, status.pairing ? "DISCOVERING" : "NOT PAIRED");
+    }
+    else {
+        const espnow_link_peer_t *peer = &status.peers[s_ui.espnow_selected];
+        lv_label_set_text_fmt(s_ui.espnow_peer, MACSTR, MAC2STR(peer->mac));
+        if (peer->online && peer->has_signal) {
+            lv_label_set_text_fmt(s_ui.espnow_detail, "%u/%u ONLINE  %d dBm",
+                                  (unsigned)s_ui.espnow_selected + 1, (unsigned)status.peer_count, (int)peer->rssi);
+        }
+        else {
+            lv_label_set_text_fmt(s_ui.espnow_detail, "%u/%u %s", (unsigned)s_ui.espnow_selected + 1,
+                                  (unsigned)status.peer_count, peer->paired ? "OFFLINE" : "PAIRING");
+        }
+    }
+    if (status.state == ESPNOW_LINK_ERROR) {
+        lv_label_set_text_fmt(s_ui.hint, "ERROR 0x%X", (unsigned)status.error);
+    }
+    else if (status.storage_error != ESP_OK) {
+        lv_label_set_text_fmt(s_ui.hint, "CH %u  RAM ONLY", (unsigned)ESPNOW_LINK_CHANNEL);
+    }
+    else {
+        lv_label_set_text_fmt(s_ui.hint, "CH %u  %u/%u PAIRED", (unsigned)ESPNOW_LINK_CHANNEL,
+                              (unsigned)paired_count, (unsigned)ESPNOW_LINK_MAX_PEERS);
+    }
+    lv_obj_set_style_bg_color(s_ui.accent,
+                              lv_color_hex(status.online_count ? 0x55C76A : (status.pairing ? UI_BROWN : UI_RED)), 0);
+}
+
 static void ui_build_page_content(lv_obj_t *page)
 {
     char idx[10];
 
+    if (s_ui.page_id == UI_PAGE_MOTION) {
+        s_ui.motion = motion_level_create(page, UI_YELLOW, UI_BLACK);
+        assert(s_ui.motion);
+    }
+
     s_ui.title = ui_label(page, s_page_names[s_ui.page_id], 7, UI_BLACK, &lv_font_montserrat_14, LV_TEXT_ALIGN_LEFT);
     snprintf(idx, sizeof(idx), "%02u/%02u", (unsigned)s_ui.page_id + 1, (unsigned)UI_PAGE_COUNT);
     s_ui.status = ui_label(page, idx, 7, UI_BROWN, &lv_font_montserrat_10, LV_TEXT_ALIGN_RIGHT);
+
+    if (s_ui.page_id == UI_PAGE_MOTION) {
+        return;
+    }
 
     s_ui.accent = lv_obj_create(page);
     lv_obj_remove_style_all(s_ui.accent);
@@ -1637,6 +1733,11 @@ static void ui_build_page_content(lv_obj_t *page)
     lv_obj_set_style_radius(s_ui.accent, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(s_ui.accent, lv_color_hex(UI_RED), 0);
     lv_obj_set_style_bg_opa(s_ui.accent, LV_OPA_COVER, 0);
+
+    if (s_ui.page_id == UI_PAGE_ESPNOW) {
+        ui_build_espnow_page(page);
+        return;
+    }
 
     if (s_ui.page_id == UI_PAGE_ABOUT) {
         ui_build_about_page(page);
@@ -1694,6 +1795,10 @@ static void ui_show_page(ui_page_t page, int dir)
     s_ui.status = NULL;
     s_ui.hint = NULL;
     s_ui.accent = NULL;
+    s_ui.motion = NULL;
+    s_ui.espnow_peer = NULL;
+    s_ui.espnow_detail = NULL;
+    s_ui.espnow_revision = UINT32_MAX;
     ui_build_page_content(s_ui.page);
     ui_refresh();
 
@@ -1712,6 +1817,15 @@ static void ui_show_page(ui_page_t page, int dir)
 
 static void ui_refresh(void)
 {
+    if (s_ui.page_id == UI_PAGE_ESPNOW && s_ui.espnow_peer) {
+        ui_refresh_espnow();
+        return;
+    }
+    if (s_ui.page_id == UI_PAGE_MOTION && s_ui.motion) {
+        motion_level_update(s_ui.motion, s_board.acc, s_board.mpu_present);
+        return;
+    }
+
     if (!s_ui.value || !s_ui.sub || !s_ui.hint) {
         return;
     }
@@ -1743,17 +1857,6 @@ static void ui_refresh(void)
         ui_refresh_history_chart();
         break;
     }
-    case UI_PAGE_MOTION:
-        lv_label_set_text(s_ui.value, s_board.mpu_present ? s_board.gesture : "ABSENT");
-        if (s_board.mpu_present) {
-            lv_label_set_text_fmt(s_ui.sub, "P%+.1f  R%+.1f  0x%02X", s_board.pitch, s_board.roll, s_board.mpu_whoami);
-        }
-        else {
-            lv_label_set_text_fmt(s_ui.sub, "MPU 0x68  %s", short_err(s_board.last_mpu_err));
-        }
-        ui_set_hint("A rescan   L/R");
-        ui_set_bar(s_board.mpu_present ? 100 : 0);
-        break;
     case UI_PAGE_LED1:
         lv_label_set_text(s_ui.value, s_board.led1_on ? "ON" : "OFF");
         lv_label_set_text(s_ui.sub, s_board.gd32_present ? "GD32 0x40  REG A0" : "GD32 0x40 ABSENT");
@@ -1912,9 +2015,13 @@ static void ui_action(void)
         set_action(err == ESP_OK ? "Sampled" : "ADC read fail");
         break;
     case UI_PAGE_MOTION:
-        mpu_probe_and_init(true);
-        err = s_board.mpu_present ? ESP_OK : s_board.last_mpu_err;
-        set_action(s_board.mpu_present ? "MPU ready" : "MPU absent");
+        if (s_board.mpu_present && motion_level_calibrate(s_ui.motion)) {
+            set_action("Calibrating");
+        }
+        else {
+            err = ESP_ERR_INVALID_STATE;
+            set_action(s_board.mpu_present ? "No motion data" : "MPU absent");
+        }
         break;
     case UI_PAGE_LED1:
         err = gd32_write_reg(GD32_LED1_REG, s_board.led1_on ? 0 : 1);
@@ -1953,6 +2060,10 @@ static void ui_action(void)
     case UI_PAGE_GPIO26:
         err = ui_ext_toggle(1);
         break;
+    case UI_PAGE_ESPNOW:
+        err = espnow_link_start_pairing();
+        set_action(err == ESP_OK ? "Pairing requested" : "Radio cmd fail");
+        break;
     case UI_PAGE_SYSTEM:
         i2c_probe_devices(true);
         err = s_board.i2c_ready ? ESP_OK : ESP_ERR_INVALID_STATE;
@@ -1962,7 +2073,7 @@ static void ui_action(void)
         break;
     }
 
-    if (err == ESP_OK && s_ui.page_id != UI_PAGE_BUZZER) {
+    if (err == ESP_OK && s_ui.page_id != UI_PAGE_BUZZER && s_ui.page_id != UI_PAGE_MOTION) {
         buzzer_beep(660, 35);
     }
     ui_refresh();
@@ -1971,6 +2082,18 @@ static void ui_action(void)
 static void ui_cancel(void)
 {
     switch (s_ui.page_id) {
+    case UI_PAGE_ESPNOW: {
+        espnow_link_status_t status;
+        espnow_link_get_status(&status);
+        if (status.pairing || status.state == ESPNOW_LINK_STARTING || status.peer_count == 0) {
+            espnow_link_cancel_pairing();
+        }
+        else {
+            const uint8_t index = s_ui.espnow_selected < status.peer_count ? s_ui.espnow_selected : 0;
+            espnow_link_forget(status.peers[index].mac);
+        }
+        break;
+    }
     case UI_PAGE_LED1:
         if (s_board.led1_on) {
             esp_err_t err = gd32_write_reg(GD32_LED1_REG, 0);
@@ -2043,6 +2166,15 @@ static void ui_cancel(void)
 static void ui_adjust(int step)
 {
     switch (s_ui.page_id) {
+    case UI_PAGE_ESPNOW: {
+        espnow_link_status_t status;
+        espnow_link_get_status(&status);
+        if (status.peer_count) {
+            s_ui.espnow_selected = (s_ui.espnow_selected + status.peer_count - step) % status.peer_count;
+            s_ui.espnow_revision = UINT32_MAX;
+        }
+        break;
+    }
     case UI_PAGE_BUZZER: {
         int freq = (int)s_buzzer_freq_hz + step * 110;
         s_buzzer_freq_hz = MAX(440, MIN(freq, 1760));
@@ -2104,6 +2236,13 @@ static void ui_key_event_cb(lv_event_t *e)
     }
 
     const uint32_t key = lv_event_get_key(e);
+    static uint32_t espnow_command_press = UINT32_MAX;
+    if (s_ui.page_id == UI_PAGE_ESPNOW && (key == LV_KEY_ENTER || key == LV_KEY_ESC)) {
+        if (espnow_command_press == s_key_press_serial) {
+            return;
+        }
+        espnow_command_press = s_key_press_serial;
+    }
 
     if (key == LV_KEY_LEFT || key == LV_KEY_RIGHT) {
         int next = (int)s_ui.page_id + (key == LV_KEY_RIGHT ? 1 : -1);
@@ -2237,4 +2376,8 @@ void app_main(void)
                                  LVGL_TASK_PRIORITY,
                                  NULL);
     ESP_ERROR_CHECK(ret == pdPASS ? ESP_OK : ESP_FAIL);
+    const esp_err_t radio_err = espnow_link_init();
+    if (radio_err != ESP_OK) {
+        ESP_LOGW(TAG, "ESP-NOW controller unavailable: %s", esp_err_to_name(radio_err));
+    }
 }
